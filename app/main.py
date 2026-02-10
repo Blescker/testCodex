@@ -1,9 +1,10 @@
-"""FastAPI application for managing a barber shop."""
+"""FastAPI application including a demo for anemia prediction."""
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,24 @@ from .database import get_connection, init_db
 UPLOAD_DIR = Path(__file__).resolve().parent / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+FEATURES = [
+    "RIDAGEYR",
+    "RIAGENDR",
+    "RIDEXPRG",
+    "LBXIRN",
+    "LBXUIB",
+    "LBDTIB",
+    "LBDPCT",
+    "LBXFER",
+    "LBXHSCRP",
+    "LBXRBCSI",
+    "LBXMCVSI",
+    "LBXMCHSI",
+    "LBXMC",
+    "LBXRDW",
+]
+MODEL_PATH = Path(os.getenv("ANEMIA_MODEL_PATH", "app/models/anemia_model.joblib"))
+
 app = FastAPI(title="Barber Shop Manager", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -23,6 +42,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+anemia_model: Optional[Any] = None
 
 
 class CustomerCreate(BaseModel):
@@ -83,9 +104,80 @@ class ChatMessage(ChatMessageCreate):
     created_at: datetime
 
 
+class AnemiaPredictionInput(BaseModel):
+    RIDAGEYR: float
+    RIAGENDR: float
+    RIDEXPRG: float
+    LBXIRN: float
+    LBXUIB: float
+    LBDTIB: float
+    LBDPCT: float
+    LBXFER: float
+    LBXHSCRP: float
+    LBXRBCSI: float
+    LBXMCVSI: float
+    LBXMCHSI: float
+    LBXMC: float
+    LBXRDW: float
+
+
+class AnemiaPredictionResponse(BaseModel):
+    prediction: float
+    prediction_label: Optional[str]
+    probability: Optional[float]
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
+    global anemia_model
     init_db()
+    if MODEL_PATH.exists():
+        import importlib
+
+        try:
+            joblib = importlib.import_module("joblib")
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("Instala joblib para cargar el modelo de anemia") from exc
+        anemia_model = joblib.load(MODEL_PATH)
+
+
+def _build_feature_row(payload: AnemiaPredictionInput) -> List[float]:
+    as_dict = payload.dict()
+    return [as_dict[name] for name in FEATURES]
+
+
+@app.get("/anemia/features", response_model=List[str])
+async def get_anemia_features() -> List[str]:
+    return FEATURES
+
+
+@app.post("/anemia/predict", response_model=AnemiaPredictionResponse)
+async def predict_anemia(payload: AnemiaPredictionInput) -> AnemiaPredictionResponse:
+    if anemia_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Modelo no cargado. Coloca tu archivo joblib en "
+                f"{MODEL_PATH} o define ANEMIA_MODEL_PATH"
+            ),
+        )
+
+    feature_row = _build_feature_row(payload)
+    prediction = float(anemia_model.predict([feature_row])[0])
+
+    probability: Optional[float] = None
+    if hasattr(anemia_model, "predict_proba"):
+        probability = float(anemia_model.predict_proba([feature_row])[0][1])
+
+    prediction_label: Optional[str] = None
+    if prediction in {0.0, 1.0}:
+        prediction_label = "anemia" if prediction == 1.0 else "sin_anemia"
+
+    return AnemiaPredictionResponse(
+        prediction=prediction,
+        prediction_label=prediction_label,
+        probability=probability,
+    )
 
 
 @app.post("/customers", response_model=Customer, status_code=201)
